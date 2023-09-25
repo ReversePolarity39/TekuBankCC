@@ -1,5 +1,5 @@
 -- Must be called bankAPI.lua
-rednet.open("top")
+rednet.open("back")
 
 -- Existing balance function
 function balance(acc, atm, pin)
@@ -188,64 +188,30 @@ function generatePairingCode(accountID)
     return true, pairingCode
 end
 
-function createTransitAccount()
-    local file = fs.open("saves/transit_account", "r")
-    if file == nil then
-        file = fs.open("saves/transit_account", "a")
-        file.writeLine(0)  -- Initial balance
-        --generate a random 4 digit pin
-        local transitPin = math.random(1000, 9999)
-        file.writeLine(transitPin)
-        file.close()
-        return "Transit Account successfully created. PIN: " .. transitPin
-    else
-        file.close()
-        return "Transit Account already exists"
-    end
-end
-
--- Function to get the list of available transit accounts
-function listTransitAccounts()
-    local list = fs.list("saves/")
-    local transitAccounts = {}
-    for _, fileName in ipairs(list) do
-        if string.find(fileName, "transit_") then
-            table.insert(transitAccounts, string.sub(fileName, 9))
-        end
-    end
-    return transitAccounts
-end
-
--- Function to check balance of a specific transit account with disk ID
-function checkTransitBalance(transitName, diskID)
-    local fileName = "saves/transit_" .. transitName
-    local file = fs.open(fileName, "r")
+function validateAccount(accID)
+    local file = fs.open("saves/".. accID, "r")
     if file ~= nil then
-        local balance = file.readLine()
-        local pin = file.readLine()
-        local authDiskID = file.readLine()
         file.close()
-        if authDiskID == diskID then
-            return true, balance
-        else
-            return false, "Unauthorized disk"
-        end
+        return true
     else
-        return false, "Account does not exist"
+        return false
     end
 end
 
-function associateDiskWithTransitAccount(transitName, diskID)
-    local status, resp = bankAPI.associateDiskWithTransitAccount(transitName, diskID)
-    if status then
-        print("Disk successfully associated with Transit Account: ", resp)
+-- Function to get PIN from server with ID 11
+function getPinFromServer11(accountID)
+    rednet.send(11, { "getPin", accountID }, "pinRequest")
+    local id, message = rednet.receive("pinResponse", 5) -- Wait for 5 seconds
+    if id == 11 and message and message[1] == "pinResponse" then
+        return message[2] -- Assuming that the PIN is sent as the second element in the message
     else
-        print("Failed to associate Disk with Transit Account: ", resp)
+        return nil -- Didn't get a response or got an invalid response
     end
 end
+
 
 function loadTransitAccounts()
-    local file = fs.open("./saves/transit_acc", "r")
+    local file = fs.open("./userData/transit_acc", "r")
     local data = file.readAll()
     file.close()
     -- Parse data and populate transitAccounts
@@ -255,20 +221,66 @@ function updateTransitAccounts(id, company)
     -- Add to transitAccounts table
     transitAccounts[id] = company
     -- Update the file
-    local file = fs.open("./saves/transit_acc", "w")
+    local file = fs.open("./userData/transit_acc", "w")
     for id, company in pairs(transitAccounts) do
         file.writeLine(id .. ", " .. company)
     end
     file.close()
 end
 
-function handleTicketSale(company, amount) -- if the company == 1 then id is 15 if id == 2 then id is 16
-    if company == 1 then
-        local status, resp = bankAPI.posTransaction("Bradley Railway Company", amount, pin)
-        if status then
-            print("Ticket sale successfully processed: ", resp)
+-- Function to handle ticket sales and transfer money to the transit account
+function handleTicketSale(userAccID, amount, transitCompanyID)
+    -- Determine the transit account ID based on the transit company
+    local transitAccID = (transitCompanyID == 1) and 15 or 16
+
+    -- Send a request to the bank server to withdraw money from the user's account
+    rednet.send(14, { "withdraw", userAccID, amount }, "withdrawRequest")
+    local id, message = rednet.receive("withdrawResponse", 5)
+    if id == 14 and message and message[1] == "withdrawResponse" then
+        if message[2] then
+            -- Withdrawal successful, now deposit the amount into the transit account
+            rednet.send(14, { "deposit", transitAccID, amount }, "depositRequest")
+            id, message = rednet.receive("depositResponse", 5)
+            if id == 14 and message and message[1] == "depositResponse" then
+                if message[2] then
+                    return true, "Ticket purchased successfully"
+                else
+                    return false, "Failed to deposit into transit account"
+                end
+            else
+                return false, "Failed to receive deposit response"
+            end
         else
-            print("Failed to process ticket sale: ", resp)
+            return false, "Insufficient balance"
         end
-    bankAPI.deposit(id, amount, ATM, pin)  -- Assuming ATM and pin are accessible
+    else
+        return false, "Failed to receive withdraw response"
+    end
+end
+
+-- Function to perform a generic transaction between accounts
+function performTransaction(fromAccID, toAccID, amount)
+    -- First, let's check if both accounts exist
+    local fromExists = validateAccount(fromAccID)
+    local toExists = validateAccount(toAccID)
+
+    if not fromExists or not toExists then
+        return false, "One or both accounts do not exist."
+    end
+    
+    -- Try to withdraw from the sender's account
+    local withdrawSuccess, withdrawMsg = withdraw(fromAccID, amount, nil, nil)  -- Assuming ATM and PIN are not required
+    if not withdrawSuccess then
+        return false, "Withdrawal failed: " .. withdrawMsg
+    end
+    
+    -- Try to deposit into the receiver's account
+    local depositSuccess, depositMsg = deposit(toAccID, amount, nil, nil)  -- Assuming ATM and PIN are not required
+    if not depositSuccess then
+        -- If deposit fails, we should ideally return the money back to the sender's account
+        -- Here I'm assuming that the deposit function, if it fails, would not have modified the sender's balance
+        return false, "Deposit failed: " .. depositMsg
+    end
+    
+    return true, "Transaction successful."
 end

@@ -1,0 +1,53 @@
+-- Load the bank API
+os.loadAPI("bankAPI.lua")
+
+-- Initialize Rednet
+rednet.open("back")  -- Assuming the Rednet modem is on the back
+
+-- Initialize Redstone
+rs.setOutput("left", false)  -- Make sure the gate is initially closed. Assuming redstone output is to the left of the computer.
+
+-- Initialize ticket price
+local ticketPrice = 10
+
+-- Transit account ID
+local transitAccountID = "transitAccount"
+
+while true do
+    term.clear()
+    term.setCursorPos(1, 1)
+    print("Waiting for NFC tag (Tablet)...")
+
+    -- Listening for incoming Rednet messages (Replace 'gateChannel' with your desired channel name)
+    local senderID, accID, protocol = rednet.receive("gateChannel")
+
+    if protocol == "gateChannel" then  -- Check if the message came through the correct protocol
+        print("Tablet detected. Processing payment...")
+
+        -- Perform the transaction
+        local transactionSuccess, msg = bankAPI.performTransaction(accID, transitAccountID, ticketPrice)
+
+        if transactionSuccess then
+            -- Open the gate by activating the redstone signal
+            rs.setOutput("left", true)
+
+            -- You can create a ticket file for logging purposes if you'd like
+            local ticketFile = fs.open("./tickets/" .. os.time(), "w")
+            ticketFile.writeLine("Valid ticket")
+            ticketFile.close()
+
+            print("Payment Successful. Gate opening.")
+
+            -- Close the gate after a short delay (say, 3 seconds)
+            sleep(3)
+            rs.setOutput("left", false)
+        else
+            print("Payment Failed: " .. msg)
+        end
+        print("Press Enter to continue...")
+        read()
+    end
+
+    -- Sleep to avoid excessive CPU usage, can be adjusted
+    sleep(1)
+end
